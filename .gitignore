@@ -1,0 +1,50 @@
+
+#///////////////////////////
+# Cocos Creator 3D Project
+#///////////////////////////
+library/
+temp/
+local/
+build/
+profiles/
+native
+*.meta
+.creator/
+#//////////////////////////
+# NPM
+#//////////////////////////
+node_modules/
+
+#//////////////////////////
+# VSCode
+#//////////////////////////
+.vscode/
+
+#//////////////////////////
+# WebStorm
+#//////////////////////////
+.idea/
+
+# 日志文件
+*.log
+
+# 数据库文件
+*.sqlite3
+*.db
+
+# 编译文件
+*.class
+*.jar
+
+# 其他IDE
+# PyCharm
+.pydevproject
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.classpath
+.project
+.settings/
