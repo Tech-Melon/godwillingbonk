@@ -5,7 +5,7 @@ const { ccclass, property } = _decorator;
 export class main extends Component {
 
     start() {
-        console.log('main start');
+        // console.log('main start');
     }
 
     update(deltaTime: number) {
