@@ -184,8 +184,9 @@
       "__id__": 9
     },
     "tier": 5,
-    "maxMergeSpeed": 6,
+    "maxMergeSpeed": 8,
     "fxStyle": "classic",
+    "juiceFX": null,
     "_id": ""
   },
   {
