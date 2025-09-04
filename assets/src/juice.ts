@@ -14,12 +14,14 @@ import {
 } from 'cc';
 
 const { ccclass, property } = _decorator;
+import { JuiceAssets } from './juiceAssets';
 
 type JuiceStyle = 'classic' | 'minimal' | 'slashOnly';
 type JuiceOptions = {
     style?: JuiceStyle;     // 经典/极简/仅斩击
     duration?: number;      // 本次动效统一寿命（秒）
     autoDestroy?: boolean;  // 是否在寿命结束时销毁分组节点
+    countScale?: number;      // 新增：数量缩放，1=原始，0.5=减半
 };
 
 @ccclass('JuiceFX')
@@ -39,11 +41,11 @@ export class JuiceFX extends Component {
         if (data.circle) this.circle = data.circle;
         if (data.slash) this.slash = data.slash;
 
-        console.log('[JuiceFX:init]', {
-            particle: !!this.particle,
-            circle: !!this.circle,
-            slash: !!this.slash,
-        });
+        // console.log('[JuiceFX:init]', {
+        //     particle: !!this.particle,
+        //     circle: !!this.circle,
+        //     slash: !!this.slash,
+        // });
     }
 
     protected start(): void {
@@ -70,8 +72,11 @@ export class JuiceFX extends Component {
         const useCircle = style === 'classic' || style === 'minimal';
         const useSlash = style === 'classic' || style === 'slashOnly';
 
-        const particleCount = useParticle ? (style === 'minimal' ? 10 : 14) : 0;
-        const circleCount = useCircle ? (style === 'minimal' ? 10 : 20) : 0;
+        const countScale = Math.max(0.2, options.countScale ?? 1);
+        const particleCount = useParticle ? Math.round((style === 'minimal' ? 10 : 14) * countScale) : 0;
+        const circleCount   = useCircle   ? Math.round((style === 'minimal' ? 10 : 20) * countScale) : 0;
+        // const particleCount = useParticle ? (style === 'minimal' ? 10 : 14) : 0;
+        // const circleCount = useCircle ? (style === 'minimal' ? 10 : 20) : 0;
         // 3) 生成并播放
         if (useParticle && this.particle) {
             for (let i = 0; i < particleCount; i++) {
@@ -227,5 +232,69 @@ export class JuiceFX extends Component {
     private _randomDir(): { x: number; y: number } {
         const a = Math.random() * Math.PI * 2;
         return { x: Math.cos(a), y: Math.sin(a) };
+    }
+
+    public async playBurstAt(
+        worldPos: Vec3,
+        tier: number,
+        style: JuiceStyle = 'classic',
+        duration = 1.0
+    ): Promise<void> {
+        // 1) 取资源（按 tier）并注入到本组件
+        try {
+            const particle = await JuiceAssets.I.getByTier(tier, 'juice_l');
+            const circle   = await JuiceAssets.I.getByTier(tier, 'juice_o');
+            const slash    = await JuiceAssets.I.getByTier(tier, 'juice_q');
+            this.init({ particle, circle, slash });
+        } catch (e) {
+            console.warn('[JuiceFX.playBurstAt] load assets failed:', e);
+            // 没资源也继续（showJuice 会根据是否有 sf 决定是否生成对应元素）
+        }
+
+        // 2) 世界坐标 → 本节点的局部坐标
+        const localPos = this._toLocalPos(worldPos);
+
+        // 3) 估一个“宽度”做为强度/位移参考（也可换成你自己的规则或传参）
+        const width = this._estimateWidthByTier(tier);
+
+        // 4) 复用现成的 showJuice（内部会自动销毁生成的分组）
+        const life = Math.max(0.6, duration);
+        this.showJuice(localPos, width, { style, duration: life, autoDestroy: true });
+
+        // 5) 返回一个会在动效结束后 resolve 的 Promise（便于上层 await）
+        return new Promise<void>((resolve) => {
+            this.scheduleOnce(() => resolve(), life);
+        });
+    }
+
+    /** 世界坐标 → 本节点局部坐标（UI/非 UI 都能用的安全写法） */
+    private _toLocalPos(worldPos: Vec3): Vec3 {
+        // 如果是 UI 节点，优先用 UITransform 的 AR 转换
+        const ui = this.getComponent(UITransform);
+        if (ui) {
+            return ui.convertToNodeSpaceAR(worldPos);
+        }
+        // 通用兜底：建个临时子节点设世界坐标，读取其局部坐标后销毁
+        const probe = new Node('__probe__');
+        this.node.addChild(probe);
+        probe.setWorldPosition(worldPos);
+        const local = probe.position.clone();
+        probe.removeFromParent();
+        probe.destroy();
+        return local;
+    }
+
+    /** 根据 tier 粗略估一个宽度（可按你实际水果直径/贴图尺寸改） */
+    private _estimateWidthByTier(tier: number): number {
+        // 方案 A：线性估计
+        // return 40 + (tier - 1) * 8;
+
+        // 方案 B：按贴图原尺寸估（若 particle 已就绪）
+        if (this.particle) {
+            const os = this.particle.originalSize;
+            if (os?.width) return Math.max(32, os.width);
+        }
+        // 兜底
+        return 64;
     }
 }
