@@ -1,5 +1,5 @@
 // AudioManager.ts
-import { _decorator, Component, AudioSource, AudioClip, clamp, Node as CNode } from 'cc';
+import { _decorator, Component, AudioSource, AudioClip, clamp, Node as CNode, sys } from 'cc';
 const { ccclass, property } = _decorator;
 
 @ccclass('AudioManager')
@@ -14,107 +14,66 @@ export class AudioManager extends Component {
     @property({ type: AudioClip, tooltip: '落地音效（单个）' }) landClip: AudioClip | null = null;
     @property({ type: [AudioClip], tooltip: '合成音效，不同等级对应不同音效' }) mergeClips: AudioClip[] = [];
 
-    @property({ tooltip: '合成音效尾部淡出毫秒数' }) mergeFadeOutMs = 20;
-    @property({ tooltip: '合成音效基础增益（避免叠加削波）' }) mergeGain = 0.8;
-    @property({ tooltip: '同一时间最多并发的合成音效个数' }) maxConcurrentMerges = 4;
-
-    // ✅ 必须用 Cocos 的 Node 类型
-    private _activeMergePlayers: CNode[] = [];
+    // ==== 新增：BGM 开关状态（持久化）====
+    private _bgmOn = true;
+    private readonly KEY_BGM_ON = 'bgmOn';
 
     onLoad() {
         AudioManager._instance = this;
+        // 读取玩家上次设置
+        const saved = sys.localStorage.getItem(this.KEY_BGM_ON);
+        if (saved !== null) this._bgmOn = saved === '1';
     }
 
     start() {
-        if (this.bgm) {
+        // 初始化并按状态决定是否播放
+        if (this.bgmSource && this.bgm) {
             this.bgmSource.clip = this.bgm;
             this.bgmSource.loop = true;
-            this.bgmSource.play();
+            if (this._bgmOn) this.bgmSource.play();
         }
     }
 
+    // ==== 新增：BGM 对外接口 ====
+    get isBgmOn(): boolean { return this._bgmOn; }
+    setBgmOn(on: boolean) {
+        this._bgmOn = on;
+        sys.localStorage.setItem(this.KEY_BGM_ON, on ? '1' : '0');
+
+        if (!this.bgmSource) return;
+
+        if (on) {
+            if (!this.bgmSource.clip && this.bgm) this.bgmSource.clip = this.bgm;
+            this.bgmSource.loop = true;
+            this.bgmSource.play();   // 再次 play 安全，重复调用也行
+        } else {
+            this.bgmSource.pause();  // 用 pause 以便下次恢复从当前位置继续
+        }
+    }
+
+    toggleBGM(): boolean {
+        this.setBgmOn(!this._bgmOn);
+        return this._bgmOn;
+    }
     // === 音量控制（0~1）===
     setBgmVolume(v: number) { this.bgmSource.volume = clamp(v, 0, 1); }
     setSfxVolume(v: number) { this.sfxSource.volume = clamp(v, 0, 1); }
 
     // === 播放：落地音效 ===
     playLand(intensity: number = 1) {
+        // console.log('playLand', intensity);
         if (!this.landClip) return;
         const vol = clamp(intensity, 0, 1);
         this.sfxSource.playOneShot(this.landClip, vol);
     }
 
     // === 播放：合成音效（带尾部淡出与并发限制） ===
-    playMerge(tier: number) {
+    playMerge(tier: number, intensity: number = 1) {
         if (this.mergeClips.length === 0) return;
         const idx = Math.min(Math.max(tier, 0), this.mergeClips.length - 1);
         const clip = this.mergeClips[idx];
         if (!clip) return;
-
-        // 并发限制，避免堆叠导致削波
-        if (this._activeMergePlayers.length >= this.maxConcurrentMerges) {
-            const old = this._activeMergePlayers.shift();
-            if (old && old.isValid) old.destroy();
-        }
-
-        this._playClipWithTailFade(clip, this.mergeGain, this.mergeFadeOutMs);
-    }
-
-    private _playClipWithTailFade(clip: AudioClip, gain: number, fadeMs: number) {
-        // ✅ 使用 Cocos 的 Node（别名 CNode）
-        const n = new CNode();
-        n.name = 'SFX_Merge_Temp';
-        this.node.addChild(n);
-
-        const src = n.addComponent(AudioSource);
-        src.loop = false;
-        src.clip = clip;
-        src.volume = Math.min(Math.max(gain, 0), 1);
-
-        this._activeMergePlayers.push(n);
-        src.play();
-
-        // 兼容不同版本：优先用 getDuration()
-        const dur = (clip as any).getDuration ? (clip as any).getDuration() : ((clip as any).duration ?? 0);
-        const fadeSec = Math.max(0, fadeMs) / 1000;
-        const startFadeAt = Math.max(0, dur - fadeSec);
-
-        // 到尾声开始做极短淡出，再销毁
-        this.scheduleOnce(() => {
-            if (!src.playing) {
-                const i = this._activeMergePlayers.indexOf(n);
-                if (i >= 0) this._activeMergePlayers.splice(i, 1);
-                n.destroy();
-                return;
-            }
-
-            const v0 = src.volume;
-            const t0 = performance.now();
-            const T = Math.max(0.005, fadeSec) * 1000;
-
-            const step = () => {
-                const t = (performance.now() - t0) / T;
-                if (t >= 1 || !src.playing) {
-                    src.volume = 0;
-                    src.stop();
-                    const i = this._activeMergePlayers.indexOf(n);
-                    if (i >= 0) this._activeMergePlayers.splice(i, 1);
-                    n.destroy();
-                    return;
-                }
-                src.volume = v0 * (1 - t);
-                requestAnimationFrame(step);
-            };
-            requestAnimationFrame(step);
-        }, startFadeAt || 0.01);
-
-        // 保险销毁（防止某些平台拿不到 duration）
-        this.scheduleOnce(() => {
-            if (n && n.isValid) {
-                const i = this._activeMergePlayers.indexOf(n);
-                if (i >= 0) this._activeMergePlayers.splice(i, 1);
-                n.destroy();
-            }
-        }, (dur || 1.0) + 0.5);
+        const vol = clamp(intensity, 0, 1);
+        this.sfxSource.playOneShot(clip, vol);
     }
 }

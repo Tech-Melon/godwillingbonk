@@ -10,12 +10,11 @@ import {
     Vec3,
     ERigidBody2DType,
     UITransform,
-    resources,
-    SpriteFrame,
     Vec2,
 } from 'cc';
 import { JuiceFX } from './juice'; // ← 确保与文件名大小写一致
 import { AudioManager } from './audioManager';
+import { CinematicFX } from './cinematicFX';
 const { ccclass, property } = _decorator;
 
 export interface IMergeGame {
@@ -48,6 +47,8 @@ export class communityMerge extends Component {
     private col: Collider2D | null = null;
     // 在 class communityMerge 内新增字段：
     private frozen = false;
+    // 只播一次的开关
+    private _landSfxPlayed = false;
 
     onLoad() {
         // 兼容：碰撞体可能挂在子节点
@@ -77,8 +78,6 @@ export class communityMerge extends Component {
 
     private onBeginContact(selfCol: Collider2D, otherCol: Collider2D, contact: IPhysics2DContact | null) {
         // ✅ 游戏结束或自身已冻结：直接不处理
-        // const isOver = (this.game as any)?.gameOver === true;
-        // if (this.frozen || isOver) return;
         if ((this.game as any)?.isGameOver) return;
         if (this.frozen) return;  // 若你已加了 freeze 机制
         // 对方可能是子节点上的碰撞体，向上找组件
@@ -96,19 +95,30 @@ export class communityMerge extends Component {
             otherCol.node.getComponent(communityMerge) ||
             otherCol.node.getComponentInChildren(communityMerge) ||
             getComponentInAncestors(otherCol.node, communityMerge);
-
-        if (!other) return;                // 不是水果
+        if (!other) {
+            // console.log('contact: ', selfCol.node.name, otherCol.node.name);
+            if (this._landSfxPlayed === false) {
+                if (otherCol.node.name === 'bottom') {
+                    const minImpactSpeed = 5;
+                    const rbA = this.rb || this.getComponent(RigidBody2D);
+                    const selfVy = rbA ? rbA.linearVelocity.y : 0;
+                    const relVy = selfVy; // 自己相对对方
+                    // console.log('impact speed', relVy);
+                    if (relVy < -minImpactSpeed) {
+                        this._landSfxPlayed = true;
+                        AudioManager.I.playLand(1);
+                    }
+                }
+            }
+            return;                // 不是水果
+        }
         // ✅ 对方已冻结或游戏结束，也不处理
         if (other.frozen || (other.game as any)?.gameOver === true) return;
         const rbA = this.rb || this.getComponent(RigidBody2D);
         const rbB = other.rb || other.getComponent(RigidBody2D);
         if (!rbA || !rbB) return;
         if (rbA.type !== ERigidBody2DType.Dynamic || rbB.type !== ERigidBody2DType.Dynamic) return;
-        if (other.tier !== this.tier) {
-            // 等级不同也可以顺手请求一次结束检查（可选）
-            // (this.game as any)?.requestCheckGameOver?.();
-            return;
-        }
+        if (other.tier !== this.tier) return;
         if (this.merging || other.merging) return;
         // console.log('contact: ', selfCol.node.name, otherCol.node.name);
         // 用 uuid 决定唯一发起者，避免双方同时触发
@@ -137,7 +147,7 @@ export class communityMerge extends Component {
             // 速度可能有轻微抖动，这里用长度判断
             const vA = rbA.linearVelocity ? rbA.linearVelocity.length() : 0;
             const vB = rbB.linearVelocity ? rbB.linearVelocity.length() : 0;
-            console.log('speed check', this.maxMergeSpeed, vA, vB);
+            // console.log('speed check', this.maxMergeSpeed, vA, vB);
             if (vA <= this.maxMergeSpeed && vB <= this.maxMergeSpeed) {
                 // console.log('into merge', this.maxMergeSpeed, vA, vB);
                 // ✅ 真正执行合成（doMergeWith 里仍会把双方 merging = true；这不冲突）
@@ -195,6 +205,10 @@ export class communityMerge extends Component {
         const fxWidth = Math.max(widthA, widthB);
 
         const nextTier = this.tier + 1;
+        if (CinematicFX.I?.hasVideoForTier(nextTier)) {
+            CinematicFX.I.enqueueVideoForTier(nextTier);
+        }
+
         // ✅ 把 tier 一起交给管理器（用当前等级或 nextTier 都可以，看你想用哪套皮）
         this.game.playJuiceAt(this.tier, pos, fxWidth, this.fxStyle as any);
         // 再生成更高一级
@@ -204,7 +218,9 @@ export class communityMerge extends Component {
         // ✅ 新增：通知游戏层计分 + 飘字
         this.game?.onMerged(nextTier, pos);
         // 播放合成音效
-        AudioManager.I.playMerge(nextTier);
+        if (!CinematicFX.I?.hasVideoForTier(nextTier)) {
+            AudioManager.I.playMerge(nextTier, 1);
+        }
         // 轻微延迟销毁更安全（给合成特效时间、避免同帧销毁回调问题）
 
         // 合成完成后也可以请求一次结束检查
@@ -215,22 +231,6 @@ export class communityMerge extends Component {
         }, 0.01);
     }
 
-    // public async explodeWithJuice(juiceFX: JuiceFX): Promise<void> {
-    //     try {
-    //         if (juiceFX) {
-    //             const wp = this.node.worldPosition.clone();
-    //             await juiceFX.playBurstAt(wp, this.tier);
-    //         }
-    //     } catch (e) {
-    //         // 忽略特效异常，保证能顺利销毁
-    //         console.warn('[explodeWithJuice] fx error:', e);
-    //     } finally {
-    //         // 最后销毁自己
-    //         try {
-    //             this.node.destroy();
-    //         } catch { }
-    //     }
-    // }
     public async explodeWithJuice(
         juiceFX: JuiceFX,
         style: 'classic' | 'minimal' | 'slashOnly' = 'classic',
@@ -255,14 +255,21 @@ export class communityMerge extends Component {
         this.unscheduleAllCallbacks();
 
         // 彻底不再接收碰撞
-        this.col = this.col || this.getComponent(Collider2D) || this.getComponentInChildren(Collider2D);
-        if (this.col) this.col.enabled = false;
+        // this.col = this.col || this.getComponent(Collider2D) || this.getComponentInChildren(Collider2D);
+        // if (this.col) this.col.enabled = false;
 
         // 可选：让刚体静止
         const rb = this.rb || this.getComponent(RigidBody2D) || this.getComponentInChildren(RigidBody2D);
         if (rb) {
-            rb.linearVelocity = new Vec2(0, 0);
-            rb.angularVelocity = 0;
+            // rb.linearVelocity = new Vec2(0, 0);
+            // rb.angularVelocity = 0;
+            rb.type = ERigidBody2DType.Static;
         }
+    }
+
+    // 解冻：恢复碰撞、重新调度 pending 的 scheduleOnce、解锁
+    public unfreezeOnGameStart(): void {
+        this.frozen = false;
+        // this.scheduleAllCallbacks();
     }
 }

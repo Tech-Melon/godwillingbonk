@@ -2,7 +2,9 @@ import {
     _decorator, Component, instantiate, Node, Prefab, Vec3, UITransform,
     input, Input, EventTouch, PhysicsSystem2D, ERigidBody2DType, Vec2, RigidBody2D,
     Label, UIOpacity, tween, v3, Color,
-    Graphics
+    Graphics,
+    director,
+    game
 } from 'cc';
 
 const { ccclass, property } = _decorator;
@@ -11,9 +13,13 @@ import { JuiceFX } from './juice';               // 你的 JuiceFX 脚本（文�
 import { JuiceAssets } from './juiceAssets';     // 你刚做的资源管理器
 import { communityMerge, IMergeGame } from './communityMerge';
 import { AudioManager } from './audioManager';
-
+import { GameOverDialog } from './gameOverDialog';
+import { resources, SpriteFrame, VideoClip, AudioClip } from 'cc';
 @ccclass('communityTs')
 export class communityTs extends Component {
+    @property({ tooltip: '当前游戏场景名（用于重开一局）' })
+    sceneName: string = 'main';   // ← 改成你的场景名
+
     @property(Node)
     communityRoot: Node = null;   // 当前正在操作的元素父节点
 
@@ -64,6 +70,14 @@ export class communityTs extends Component {
     private explodeStaggerMs: number = 80;
     // communityTs.ts 类里增加：
     private _checkQueued = false;
+
+    @property({ type: Prefab, tooltip: '游戏结束弹窗的预制体' })
+    gameOverDialogPrefab: Prefab | null = null;
+
+    @property({ type: Node, tooltip: '弹窗父节点（通常是 Canvas 或 UI 根）' })
+    dialogParent: Node | null = null;
+
+    private _gameOverDlg: Node | null = null;
 
     @property({ tooltip: '候场位相对 nextCommunityRoot 的局部坐标' })
     nextSlotX: number = 0;
@@ -130,7 +144,8 @@ export class communityTs extends Component {
     private highestTierSpawned: number = 0; // [NEW] 记录已“生成”过的最高等级（合成更高时可手动同步）
     private lastTwo: number[] = [];         // [NEW] 最近两次生成的 tier（0-based）
     /** 预设的前几次生成顺序（tier 值数组），用完后走正常逻辑 */
-    private presetTiers: number[] = [0, 0, 1, 2, 2, 3];
+    // private presetTiers: number[] = [0, 0, 1, 2, 2, 3];
+    private presetTiers: number[] = [7, 7, 7, 7, 8, 8];
     private spawnCount: number = 0;
 
     // 每个元素表示一个等级的颜色方案
@@ -159,6 +174,18 @@ export class communityTs extends Component {
         { font: new Color(255, 240, 120), outline: new Color(220, 180, 40), shadow: new Color(150, 100, 0, 120) },
     ];
 
+    private _preloadCinematics() {
+        const tiers = [8, 9, 10]; // 你定义为高阶的级别
+        tiers.forEach(t => {
+            resources.loadDir(`merge_cinematics/tier${t}`, SpriteFrame, () => { });
+        });
+    }
+    private _preloadCinematic(tiers: number[] = [8, 9, 10]) {
+        tiers.forEach(t => {
+            resources.preload(`merge_cinematics/tier${t}/clip`, VideoClip, () => { });
+        });
+        // 音频如果是从检视器数组里选的，不用手动预加载；如果是按路径加载，也可在此预热
+    }
     protected onLoad(): void {
         if (this.communityRoot) {
             this.dropLineY = this.communityRoot.getWorldPosition().y;
@@ -372,11 +399,6 @@ export class communityTs extends Component {
                 this.flashDangerLine(this.dangerFlashMs);
             }
             this._overlineFrameCount++;
-            // if (this._overlineFrameCount >= this._overlineRequired) {
-            //     // 真正结束前再打一次汇总日志，方便定位
-            //     // console.warn(`[GAMEOVER] lineY=${dangerY}, reason=fruitTop>=line, frames=${this._overlineFrameCount}`);
-            //     this.handleGameOver();
-            // }
             if (this._overlineFrameCount >= this._overlineRequired) {
                 this.onGameOverTriggered();  // ← 统一走这里
             }
@@ -425,10 +447,11 @@ export class communityTs extends Component {
         } catch { }
 
         // 禁用投放 / 触控
-        input.off(Input.EventType.TOUCH_START);
-        input.off(Input.EventType.TOUCH_MOVE);
-        input.off(Input.EventType.TOUCH_END);
-        input.off(Input.EventType.TOUCH_CANCEL);
+        input.off(Input.EventType.TOUCH_START, this.touchStart, this);
+        input.off(Input.EventType.TOUCH_MOVE, this.touchMove, this);
+        input.off(Input.EventType.TOUCH_END, this.touchEnd, this);
+        input.off(Input.EventType.TOUCH_CANCEL, this.touchEnd, this);
+
         this.ensureDangerLine();
         if (this.setDangerLineVisible) this.setDangerLineVisible(true);
         else if (this.dangerLineNode) this.dangerLineNode.active = true;
@@ -437,27 +460,108 @@ export class communityTs extends Component {
 
         // 最终刷新分数到左上角（如果你有“结算面板”，也可在这里弹出）
         this.refreshScoreUI();
+        this.showGameOverDialog(); // ← 关键
     }
-    // 取得水果“顶部”的局部 y（以 communityRoot 为基准）
-    // private _getFruitTopLocalY(n: Node): number {
-    //     const ui = n.getComponent(UITransform);
-    //     const halfH = ui ? ui.height * 0.5 : 0;
-    //     return n.position.y + halfH;
-    // }
+    /** 弹出“游戏结束”对话框 */
+    private showGameOverDialog(): void {
+        if (!this.gameOverDialogPrefab || this._gameOverDlg?.isValid) return;
 
+        const parent = this.dialogParent ?? this.node;
+        const dlg = instantiate(this.gameOverDialogPrefab);
+        parent.addChild(dlg);
+        this._gameOverDlg = dlg;
+
+        const comp = dlg.getComponent(GameOverDialog);
+        // 把当前分数传进去，点击按钮时回调 restartGame
+        const score = (this as any).score ?? 0; // 若你的分数字段名不同，可改
+        comp?.setup(score, () => this.restartGame());
+    }
+
+    /** 清场并重新开始一局 */
+    public restartGame(): void {
+        // 关弹窗
+        if (this._gameOverDlg?.isValid) {
+            this._gameOverDlg.destroy();
+            this._gameOverDlg = null;
+        }
+
+        // 为稳：再停一次所有调度
+        this.unscheduleAllCallbacks?.();
+
+        // 0) 递归停止所有 Tween（避免“幽灵补间”）
+        const stopTweensDeep = (root: Node | null) => {
+            if (!root) return;
+            // @ts-ignore
+            cc.Tween?.stopAllByTarget?.(root);
+            for (const ch of root.children) stopTweensDeep(ch);
+        };
+        stopTweensDeep(this.node);
+
+        const keep = new Set<Node>();
+        if (this.juiceFX?.node) keep.add(this.juiceFX.node);
+        keep.add(this.node);
+        // 1) 清空场景元素（棋盘 + 候场 + FX 层）
+        const clearChildren = (root: Node | null) => {
+            if (!root) return;
+            const list = [...root.children];
+            for (const ch of list) {
+                if (keep.has(ch)) continue;      // ← 跳过 JuiceFX 宿主节点
+                try {
+                    // @ts-ignore
+                    cc.Tween?.stopAllByTarget?.(ch);
+                    ch.destroy();
+                } catch { }
+            }
+        };
+        clearChildren(this.communityRoot);
+        clearChildren(this.nextCommunityRoot);
+        clearChildren(this.fxRoot);
+
+        // 1.1 危险线节点已经被清，手动把引用置空
+        this.dangerLineNode = null;
+
+        // 2) 重置状态
+        this.isGameOver = false;
+        this._overlineFrameCount = 0;
+        this._dangerBlinking = false;
+
+        this.currentNode = null;
+        this.nextNode = null;
+        this.dragging = false;
+        this.candleSelected = null;
+        this._checkQueued = false;
+
+        // 额外：生成相关计数器
+        this.spawnCount = 0;
+        this.highestTierSpawned = 0;
+        this.lastTwo = [];
+
+        // 3) 分数归零 & UI 刷新
+        this.score = 0;
+        this.refreshScoreUI?.();
+
+        // 4) 危险线复位（重画一条并先隐藏）
+        this.setDangerLineVisible?.(false);
+        this.ensureDangerLine?.();
+
+        // 5) 重新绑定输入（因为 handleGameOver 里 off 掉了）
+        input.on(Input.EventType.TOUCH_START, this.touchStart, this);
+        input.on(Input.EventType.TOUCH_MOVE, this.touchMove, this);
+        input.on(Input.EventType.TOUCH_END, this.touchEnd, this);
+        input.on(Input.EventType.TOUCH_CANCEL, this.touchEnd, this);
+
+        // 可选：烛台归位（按你初始位置改）
+        if (this.candleL) this.candleL.setPosition(-1000, this.candleL.position.y, 0);
+        if (this.candleR) this.candleR.setPosition(1000, this.candleR.position.y, 0);
+
+        // 6) 重新生成下一颗，恢复流程
+        this.spawnNextCommunity();
+    }
     // 简易延时（秒）
     // —— 工具：延时（秒）
     private _wait(sec: number): Promise<void> {
         return new Promise<void>((resolve) => this.scheduleOnce(resolve, sec));
     }
-    // private async explodeAllCommunities() {
-    //     const merges = this.communityRoot.getComponentsInChildren(communityMerge);
-    //     const tasks: Promise<void>[] = [];
-    //     for (let i = 0; i < merges.length; i++) {
-    //         tasks.push(merges[i].explodeWithJuice(this.juiceFX));
-    //     }
-    //     await Promise.allSettled(tasks);
-    // }
     // —— 工具：包含 inactive 的收集（手写 DFS，别依赖 includeInactive）
     private _collectAllMerges(roots: Node[]): communityMerge[] {
         const out: communityMerge[] = [];
@@ -507,6 +611,8 @@ export class communityTs extends Component {
                 return m.explodeWithJuice(this.juiceFX, style, fxDur)
                     .catch(() => { }); // 忽略单个异常
             });
+            // 结束时的爆炸声
+            AudioManager.I.playMerge(0, 0.8);
             await Promise.all(tasks); // 等这一波都“启动并播完”
             if (i + batchSize < merges.length && gapSec > 0) {
                 await this._wait(gapSec); // 小间隔营造瀑布感
@@ -773,7 +879,8 @@ export class communityTs extends Component {
     }
 
     private pointsForTier(tier: number): number {
-        const table = [0, 5, 15, 30, 60, 120, 250, 500, 1000, 2000, 4000];
+        // const table = [0, 5, 15, 30, 60, 120, 250, 500, 1000, 2000, 4000];
+        const table = [1, 2, 4, 8, 16, 32, 50, 100, 150, 200, 388];
         return table[tier] ?? table[table.length - 1];
     }
 
@@ -870,9 +977,12 @@ export class communityTs extends Component {
             m.attachGame(this, this.juiceFX); // ✅ 通过方法绑定，类型安全
         }
     }
+    
     protected start(): void {
         // 启动时先准备一个 next
         this.spawnNextCommunity();
         console.log('CommunityTs started');
+        // this._preloadCinematics();
+        this._preloadCinematic();
     }
 }
